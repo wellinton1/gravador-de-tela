@@ -13,13 +13,17 @@
 package native
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"syscall"
 	"unsafe"
+
+	"screenrec/internal/native/embedded"
 )
 
 // abiVersion is the value of RECORDER_NATIVE_ABI in the header.
@@ -223,10 +227,91 @@ var (
 // dllName is the file the build script produces.
 const dllName = "recorder_native.dll"
 
+// embeddedOnce/embeddedPath memoise the first-run extraction below: it runs
+// at most once per process, before the library is located.
+var (
+	embeddedOnce sync.Once
+	embeddedPath string
+)
+
+// ensureEmbedded extracts the DLL baked into the executable (see the
+// embedded package) so the program runs as a single file. It prefers the
+// executable's own folder and falls back to the temp directory when that
+// folder is not writable (e.g. Program Files for a non-admin user).
+// Files are only written when missing or different — compared by hash — so
+// a library locked by another running instance is never touched while it is
+// already current; an update that cannot replace a locked file falls through
+// to a versioned fallback name instead of failing.
+func ensureEmbedded() {
+	embeddedOnce.Do(func() {
+		data := embedded.DLL
+		if len(data) == 0 {
+			return
+		}
+		sum := sha256.Sum256(data)
+		same := func(path string) bool {
+			cur, err := os.ReadFile(path)
+			if err != nil {
+				return false
+			}
+			return sha256.Sum256(cur) == sum
+		}
+		// tryWrite stores data at path, writing aside and renaming so a
+		// concurrent reader never sees a half-written library. It reports
+		// whether path is now usable: already current, or freshly written.
+		tryWrite := func(path string) bool {
+			if same(path) {
+				return true
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				return false
+			}
+			tmp, err := os.CreateTemp(filepath.Dir(path), "rec-*.tmp")
+			if err != nil {
+				return false
+			}
+			tmpName := tmp.Name()
+			_, werr := tmp.Write(data)
+			cerr := tmp.Close()
+			if werr != nil || cerr != nil {
+				os.Remove(tmpName)
+				return false
+			}
+			if err := os.Rename(tmpName, path); err != nil {
+				os.Remove(tmpName)
+				return false
+			}
+			return true
+		}
+		if exe, err := os.Executable(); err == nil {
+			path := filepath.Join(filepath.Dir(exe), dllName)
+			if tryWrite(path) {
+				embeddedPath = path
+				return
+			}
+		}
+		// Versioned fallback: concurrent versions never fight over one
+		// name, and stale ones are just temp files the OS cleans up.
+		fallback := filepath.Join(os.TempDir(),
+			fmt.Sprintf("recorder_native-%x.dll", sum[:4]))
+		if tryWrite(fallback) {
+			embeddedPath = fallback
+		}
+	})
+}
+
 // locateLibrary finds the native library next to the program, or in the bin
 // directory of the source tree, so that `go run` and `go test` work from any
 // working directory without a build step of their own.
 func locateLibrary() (string, error) {
+	// The first-run extraction above always wins when it produced a file:
+	// beside the exe in the common case, in temp otherwise.
+	ensureEmbedded()
+	if embeddedPath != "" {
+		if _, err := os.Stat(embeddedPath); err == nil {
+			return embeddedPath, nil
+		}
+	}
 	var tried []string
 	try := func(path string) bool {
 		if _, err := os.Stat(path); err == nil {

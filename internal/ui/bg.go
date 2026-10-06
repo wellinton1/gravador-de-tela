@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"syscall"
 	"unsafe"
+
+	"screenrec/internal/ui/embedded"
 )
 
 // Window background art: 2.png baked dim into assets/bg.bmp at build time.
@@ -52,8 +54,12 @@ type bitmapInfo struct {
 	bmBits       uintptr
 }
 
-// loadBackground reads assets/bg.bmp once; zero means plain gray.
+// loadBackground reads the art baked into the executable once, falling back
+// to assets/bg.bmp; zero means plain gray.
 func loadBackground() syscall.Handle {
+	if h := bitmapFromMemory(embedded.Background); h != 0 {
+		return h
+	}
 	dir := assetsDir()
 	if dir == "" {
 		return 0

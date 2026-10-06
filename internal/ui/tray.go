@@ -136,10 +136,14 @@ func dirExists(dir string) bool {
 	return err == nil && info.IsDir()
 }
 
-// loadIconFile loads one size from an .ico on disk, or zero when assets are
-// absent — every caller falls back to the stock icon, so a missing folder
-// never breaks the window.
+// loadIconFile loads one size from the art baked into the executable,
+// falling back to an .ico on disk, or zero when both are absent — every
+// caller falls back to the stock icon, so missing art never breaks the
+// window.
 func loadIconFile(name string, size int) syscall.Handle {
+	if h := iconFromMemory(embeddedIcon(name), size); h != 0 {
+		return h
+	}
 	dir := assetsDir()
 	if dir == "" {
 		return 0
